@@ -862,7 +862,11 @@ from powercontext.server.authz.owner_recovery import (
     owner_recovery_session,
     owner_write_access,
 )
-from powercontext.server.authz.profiles import ARTIFACT_FAMILY_PROFILES, artifact_family_profile
+from powercontext.server.authz.profiles import (
+    ARTIFACT_FAMILY_PROFILES,
+    artifact_family_profile,
+    register_custom_artifact_access_family,
+)
 from powercontext.server.authz.service import _require_allowed
 from powercontext.server.context import (
     bind_request_id,
@@ -1381,6 +1385,8 @@ def create_app(
     )
     app.openapi_version = OPENAPI_VERSION
     app.state.artifact_plugin_manager = None
+    app.state.artifact_declaration_provider = None
+    app.state.artifact_access_refresher = None
     app.state.application = application
     app.state.capability_provider = capability_provider
     app.state.readiness_probe = readiness_probe
@@ -1690,6 +1696,7 @@ async def access_readiness_checks(state: Any) -> dict[str, str]:
             authentication_status = "ready" if (await authentication.readiness()).ready else "not_ready"
         except Exception:
             authentication_status = "not_ready"
+    # This process learns families at startup, on access, or through capabilities discovery.
     family_capabilities = ",".join(
         f"{profile.family}:{'enabled' if profile.enabled else 'disabled'}"
         for profile in sorted(ARTIFACT_FAMILY_PROFILES.values(), key=lambda item: item.family)
@@ -1778,10 +1785,14 @@ async def unload_artifact_plugin(
 async def get_capabilities(request: Request) -> Capabilities:
     capability_provider: CapabilityProvider | None = request.app.state.capability_provider
     value = capability_provider() if capability_provider is not None else request.app.state.capabilities
-    manager = request.app.state.artifact_plugin_manager
-    if manager is None:
+    declaration_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = (
+        request.app.state.artifact_declaration_provider
+    )
+    if declaration_provider is None:
         return value
-    declarations = await manager.declarations()
+    declarations = await declaration_provider()
+    for declaration in declarations:
+        register_custom_artifact_access_family(declaration["family"])
     return Capabilities.model_validate({
         **value.model_dump(mode="json"),
         "artifact_families": value.artifact_families
@@ -1834,6 +1845,7 @@ async def check_access(payload: AccessCheckRequest, request: Request) -> AccessC
         )
         for requirement in payload.requirements
     ])
+    await _refresh_artifact_access(request.app.state, {resource.family for _, resource in requirements})
     decisions = await access.check_batch(
         _require_principal(),
         requirements,
@@ -1853,6 +1865,8 @@ async def check_access(payload: AccessCheckRequest, request: Request) -> AccessC
 async def list_access_resources(payload: ListAccessResourcesRequest, request: Request) -> AccessResourcePage:
     access = _require_access_control(request)
     resource_type = AccessResourceType(payload.resource_type.value)
+    if resource_type is AccessResourceType.ARTIFACT:
+        await _refresh_artifact_access(request.app.state, {payload.family})
     page = await access.list_resources(
         _require_principal(),
         action=AccessAction(payload.action.value),
@@ -1971,6 +1985,7 @@ async def list_access_roles(payload: ListAccessRolesRequest, request: Request) -
     if payload.family is not None:
         if resource_type not in {None, AccessResourceType.ARTIFACT}:
             raise AccessInvalidRequestError("action-resource")
+        await _refresh_artifact_access(request.app.state, {payload.family})
         selected_profile = ARTIFACT_FAMILY_PROFILES.get(payload.family)
         if selected_profile is None:
             raise AccessInvalidRequestError("artifact-family")
@@ -2024,10 +2039,12 @@ async def list_access_roles(payload: ListAccessRolesRequest, request: Request) -
 
 async def list_access_bindings(payload: ListAccessBindingsRequest, request: Request) -> AccessBindingPage:
     access = _require_access_control(request)
+    resource = _supported_access_resource(_access_resource(payload.management_resource))
+    await _refresh_artifact_access(request.app.state, {resource.family})
     page = await access.list_bindings(
         _require_principal(),
         BindingSearchRequest(
-            management_resource=_supported_access_resource(_access_resource(payload.management_resource)),
+            management_resource=resource,
             subject=None if payload.subject is None else _access_subject(payload.subject),
             role=None if payload.role is None else AccessRole(payload.role.value),
             state=None if payload.state is None else AccessBindingState(payload.state.value),
@@ -2044,11 +2061,13 @@ async def list_access_bindings(payload: ListAccessBindingsRequest, request: Requ
 
 async def create_access_binding(payload: CreateAccessBindingRequest, request: Request) -> TransportAccessBinding:
     access = _require_access_control(request)
+    resource = _supported_access_resource(_access_resource(payload.resource))
+    await _refresh_artifact_access(request.app.state, {resource.family})
     binding = await access.create_binding(
         _require_principal(),
         CreateBinding(
             subject=_access_subject(payload.subject),
-            resource=_supported_access_resource(_access_resource(payload.resource)),
+            resource=resource,
             role=AccessRole(payload.role.value),
             idempotency_key=payload.idempotency_key,
             reason=payload.reason,
@@ -2068,6 +2087,7 @@ async def revoke_access_binding(payload: RevokeAccessBindingRequest, request: Re
         expected_version=payload.expected_version,
         idempotency_key=payload.idempotency_key,
         context=_access_audit_context(REVOKE_ACCESS_BINDING.operation_id),
+        prepare_resource=lambda resource: _refresh_artifact_access(request.app.state, {resource.family}),
     )
     return _access_binding_response(binding)
 
@@ -2088,6 +2108,7 @@ async def replace_access_binding(
             expires_at=payload.replacement.expires_at,
         ),
         context=_access_audit_context(REPLACE_ACCESS_BINDING.operation_id),
+        prepare_resource=lambda resource: _refresh_artifact_access(request.app.state, {resource.family}),
     )
     return TransportAccessBindingReplacement(
         previous=_access_binding_response(result.previous),
@@ -2824,6 +2845,8 @@ async def search_artifacts(
     if artifacts is None:
         raise ArtifactSearchUnsupported(family, field="family")
     access = access_control_for_mode(http_request.app.state.access_control, mode=http_request.app.state.access_mode)
+    if access is not None:
+        await _refresh_artifact_access(http_request.app.state, {family})
     execution_context = ArtifactSearchExecutionContext(
         principal=_require_principal() if access is not None else None,
         access=access,
@@ -5010,6 +5033,15 @@ def _authorization_dependency(
     return authorize
 
 
+async def _refresh_artifact_access(state: Any, families: set[str | None]) -> None:
+    refresh = getattr(state, "artifact_access_refresher", None)
+    if refresh is None:
+        return
+    missing = {family for family in families if family is not None and family not in ARTIFACT_FAMILY_PROFILES}
+    if missing:
+        await refresh(missing)
+
+
 async def _authorize_checks(
     request: Request,
     access: AccessControlService,
@@ -5017,6 +5049,7 @@ async def _authorize_checks(
     *,
     operation: str,
 ) -> None:
+    await _refresh_artifact_access(request.app.state, {resource.family for _, resource in checks})
     context = _access_audit_context(operation)
     principal = current_principal()
     decisions = (

@@ -65,7 +65,7 @@ from powercontext.http._generated.models import (
     EnableArtifactPluginResult,
     ReloadArtifactPluginRequest,
 )
-from powercontext.server.authz.profiles import register_custom_artifact_access_family
+from powercontext.server.authz.profiles import ARTIFACT_FAMILY_PROFILES, register_custom_artifact_access_family
 
 _STABLE_PHASES = frozenset({"enabled", "disabled", "unloaded", "failed"})
 _STATES = ARTIFACT_PROCESSING_BINDING_STATES_TABLE
@@ -80,6 +80,28 @@ _STATE_COLUMNS = (
 )
 _SCHEMAS = ARTIFACT_FAMILY_SCHEMAS_TABLE
 logger = logging.getLogger(__name__)
+
+
+async def read_artifact_declarations(database: AsyncDatabase) -> list[dict[str, Any]]:
+    async with database.transaction() as connection:
+        return list(
+            (
+                await connection.execute(
+                    select(_SCHEMAS.c.declaration).order_by(_SCHEMAS.c.family, _SCHEMAS.c.schema_version)
+                )
+            ).scalars()
+        )
+
+
+async def refresh_artifact_access_families(database: AsyncDatabase, families: set[str]) -> None:
+    families = families - ARTIFACT_FAMILY_PROFILES.keys()
+    if not families:
+        return
+    statement = select(_SCHEMAS.c.family).distinct().where(_SCHEMAS.c.family.in_(families))
+    async with database.transaction() as connection:
+        registered = (await connection.execute(statement)).scalars().all()
+    for family in registered:
+        register_custom_artifact_access_family(family)
 
 
 class ArtifactPluginManager:
@@ -211,16 +233,6 @@ class ArtifactPluginManager:
                 .all()
             )
         return [self._state(dict(row)) for row in rows]
-
-    async def declarations(self) -> list[dict[str, Any]]:
-        async with self.database.transaction() as connection:
-            return list(
-                (
-                    await connection.execute(
-                        select(_SCHEMAS.c.declaration).order_by(_SCHEMAS.c.family, _SCHEMAS.c.schema_version)
-                    )
-                ).scalars()
-            )
 
     async def _discover(self) -> None:
         directory = self.plugins_dir

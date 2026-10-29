@@ -20,6 +20,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, nullcontext, suppress
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -64,7 +65,11 @@ from powercontext.http import (
 from powercontext.paths import default_scheduler_path
 from powercontext.server.access import HttpAccessLogMiddleware
 from powercontext.server.app import _bind_evidence_access, access_readiness_checks, create_app
-from powercontext.server.artifact_plugins import ArtifactPluginManager
+from powercontext.server.artifact_plugins import (
+    ArtifactPluginManager,
+    read_artifact_declarations,
+    refresh_artifact_access_families,
+)
 from powercontext.server.authentication import (
     AuthenticationProvider,
     StaticBearerAuthenticationProvider,
@@ -293,6 +298,7 @@ def create_server_app(  # noqa: C901
             await identity_repository.initialize()
             server_id = await identity_repository.load_or_create()
             records = await _restore_artifact_access_profiles(runtime)
+            app.state.artifact_access_refresher = partial(refresh_artifact_access_families, records.database)
             _bind_evidence_access(runtime, active_access_control, resolved.access.mode)
             if (
                 config.runtime.artifact_processing_supervisor_mode == "global"
@@ -348,6 +354,7 @@ def create_server_app(  # noqa: C901
                     }
                 )
 
+            app.state.artifact_declaration_provider = partial(read_artifact_declarations, records.database)
             app.state.capabilities = capabilities
             app.state.capability_provider = current_capabilities
             app.state.server_info = server_info(server_id)
@@ -360,6 +367,8 @@ def create_server_app(  # noqa: C901
                 _log_lifecycle("server.stopping", "PowerContext Server is stopping")
                 readiness_probe.unbind()
                 app.state.artifact_plugin_manager = None
+                app.state.artifact_declaration_provider = None
+                app.state.artifact_access_refresher = None
                 app.state.application = None
                 app.state.dashboard_runtime = None
                 app.state.capability_provider = None
