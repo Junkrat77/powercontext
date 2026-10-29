@@ -319,3 +319,113 @@ async def _scope_shrink_and_discovery(directory):
                 assert written["result"]["source_refs"] == [{"source_type": "content", "source_id": "offline-write"}]
         finally:
             await stop_services(directory, state)
+
+
+def test_tickets_refreshes_targets_when_a_later_scope_is_disabled(tmp_path):
+    asyncio.run(_tickets_target_refresh(tmp_path))
+
+
+async def _tickets_target_refresh(directory):
+    envfile, state = prepare_environment(directory)
+    environment = {
+        "POWERCONTEXT_SERVER_SOURCE_PLUGINS_DIR": str(directory / "source-plugins"),
+        "POWERCONTEXT_SERVER_SOURCE_MANAGEMENT": json.dumps({"state_dir": str(state)}),
+    }
+    async with running_server(directory, environment=environment) as (admin, url, _process):
+        bind_server(envfile, url)
+        scopes = sorted([await create_scope(admin, name) for name in ("first", "second")])
+        for scope in scopes:
+            await grant_scope(admin, scope)
+        plugin = directory / "tickets"
+        shutil.copytree(ROOT / "examples/source_plugins/tickets", plugin, ignore=shutil.ignore_patterns("__pycache__"))
+        entry = plugin / "__init__.py"
+        # Pause real connector I/O so a later Scope's saved target becomes stale deterministically.
+        entry.write_text(
+            entry.read_text()
+            + f"""
+
+_run = TicketConnector.run
+async def paused_run(self, session):
+    if self.targets[0].scope_id == {scopes[0]!r} and (self.ctx.plugin_dir / "pause").exists():
+        (self.ctx.plugin_dir / "paused").touch()
+        while not (self.ctx.plugin_dir / "resume").exists():
+            await asyncio.sleep(0.05)
+    result = await _run(self, session)
+    if (self.ctx.plugin_dir / "paused").exists():
+        (self.ctx.plugin_dir / "finished").touch()
+    return result
+TicketConnector.run = paused_run
+"""
+        )
+        records = plugin / "tickets.json"
+        records.write_text('[{"id":"A","body":"Initial"}]')
+        manifest = plugin / "powercontext.yml"
+        manifest.write_text(
+            yaml.safe_dump({
+                "id": "tickets-refresh",
+                "plugin": str(plugin),
+                "scope_ids": scopes,
+                "config": {"namespace": "refresh", "poll_interval": 0.1},
+                "targets": [
+                    {"scope_id": scope, "capability": "tickets.item", "capability_version": "1", "input": {"id": "A"}}
+                    for scope in scopes
+                ],
+            })
+        )
+        try:
+            await cli(directory, "source", "load", "--config", str(manifest), "--env-file", str(envfile))
+            targets = []
+            for scope in scopes:
+                response = await admin.post(
+                    "/v1/source-management/add",
+                    json={
+                        "scope_id": scope,
+                        "instance_id": "tickets-refresh",
+                        "capability": "tickets.item",
+                        "capability_version": "1",
+                        "input": {"id": "A"},
+                    },
+                )
+                assert response.status_code == 200, response.text
+                targets.append(response.json()["target_id"])
+                await received(admin, scope, targets[-1], 1, namespace="refresh")
+            (plugin / "pause").touch()
+            async with asyncio.timeout(40):
+                while not (plugin / "paused").exists():  # noqa: ASYNC110 - subprocess rendezvous
+                    await asyncio.sleep(0.1)
+            response = await admin.post(
+                "/v1/source-management/target-set-enabled",
+                json={
+                    "scope_id": scopes[1],
+                    "target_id": targets[1],
+                    "enabled": False,
+                },
+            )
+            assert response.status_code == 200, response.text
+            async with asyncio.timeout(40):
+                while True:
+                    response = await admin.post(
+                        "/v1/source-management/status",
+                        json={
+                            "scope_id": scopes[1],
+                            "target_id": targets[1],
+                        },
+                    )
+                    assert response.status_code == 200, response.text
+                    if response.json()["tracking"] == "stopped":
+                        break
+                    await asyncio.sleep(0.1)
+            (plugin / "resume").touch()
+            # The paused batch may finish; require another batch to consume a new snapshot.
+            async with asyncio.timeout(40):
+                while not (plugin / "finished").exists():  # noqa: ASYNC110 - subprocess rendezvous
+                    await asyncio.sleep(0.1)
+            replacement = plugin / "tickets.next.json"
+            replacement.write_text('[{"id":"A","body":"After target stop"}]')
+            replacement.replace(records)
+            await received(admin, scopes[0], targets[0], 2, namespace="refresh")
+            assert (await instance_state(admin, "tickets-refresh"))["actual"] == "running"
+            await received(admin, scopes[1], targets[1], 1, namespace="refresh")
+        finally:
+            (plugin / "resume").touch()
+            await stop_services(directory, state)

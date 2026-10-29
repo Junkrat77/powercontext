@@ -2801,6 +2801,7 @@ const PAYLOAD_WRITES = new Set([
 	"change_atomic_memory_lifecycle"
 ]);
 const CONTENT_FIELDS = new Map([
+	["pc_source_add", ["input"]],
 	["create_scope", [
 		"title",
 		"summary",
@@ -3711,7 +3712,14 @@ function rawOperation(name$1) {
 	const operation = name$1.slice(MCP_TOOL_PREFIX.length);
 	return Object.prototype.hasOwnProperty.call(MCP_OPERATIONS, operation) ? operation : void 0;
 }
-function usesScope(operation) {
+function usesScope(operation, args) {
+	if ([
+		"pc_source_capabilities",
+		"pc_source_add",
+		"pc_source_status",
+		"pc_source_target_set_enabled"
+	].includes(operation)) return "current";
+	if (operation === "pc_source_instances") return isRecord(args) && args.view === "control" ? "none" : "current";
 	const metadata = OPERATIONS[operation];
 	if (metadata.pathParameters.some((parameter) => parameter === "scope_id")) return "current";
 	return metadata.scopeMode;
@@ -3734,7 +3742,7 @@ function registerMcpPolicy(ctx, resolveScope) {
 			kind: "deny",
 			reason: "secret_rejected: PowerContext refuses to send likely secret content. No MCP request was sent."
 		};
-		const mode = usesScope(operation);
+		const mode = usesScope(operation, exec.arguments);
 		if (mode !== "none") {
 			const cwd = exec.agent?.session?.header?.cwd;
 			let scopeId;

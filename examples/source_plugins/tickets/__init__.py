@@ -22,6 +22,7 @@ import json
 from pydantic import BaseModel, Field
 
 from powercontext.source_management import Capability, TargetIdentity
+from powercontext.source_management.models import ManagementError
 from powercontext.sources import ConnectorRunCompletion, ConnectorRunStatus, ConnectorSubmissionStatus
 
 from .definition import TicketCapture, TicketDefinition
@@ -126,5 +127,11 @@ async def apply(ctx, config):
         for scope_id in sorted({target.scope_id for target in targets}):
             selected = tuple(target for target in targets if target.scope_id == scope_id)
             connector.targets = selected
-            await ctx.run_batch(scope_id=scope_id, targets=selected)
+            try:
+                await ctx.run_batch(scope_id=scope_id, targets=selected)
+            except ManagementError as error:
+                if error.code != "stale-target":
+                    raise
+                # Another Scope's batch may have outlived this target snapshot.
+                break
         await asyncio.sleep(config.poll_interval)
