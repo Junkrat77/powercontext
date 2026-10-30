@@ -57,6 +57,13 @@ def error_payload(error: ManagementError) -> dict[str, Any]:
     return {"error": {"code": error.code, "message": error.message, "status": error.status}}
 
 
+def _sync_target_size(snapshot: dict[str, Any]) -> int:
+    length = len(canonical(snapshot).encode())
+    if length > MAX_MESSAGE_BYTES - 3072:
+        raise ManagementError("response-too-large", "One target exceeds the sync limit")
+    return length
+
+
 class SourceManager:
     def __init__(self, config: ManagerConfig) -> None:
         self.config = config
@@ -382,6 +389,8 @@ class SourceManager:
                 "source_refs": [],
                 "updated_at": timestamp(),
             }
+            snapshot = {k: target[k] for k in SourceTarget.model_fields if k in target}
+            _sync_target_size(snapshot)
             with self.store.transaction():
                 self.store.claim_identity(identity, target["target_id"])
                 self.save_work(target)
@@ -482,9 +491,7 @@ class SourceManager:
                 destination = targets
             else:
                 continue
-            length = len(canonical(snapshot).encode())
-            if length > MAX_MESSAGE_BYTES - 3072:
-                raise ManagementError("response-too-large", "One target exceeds the sync limit")
+            length = _sync_target_size(snapshot)
             if size + length > MAX_MESSAGE_BYTES - 2048:
                 next_cursor = last_id
                 break

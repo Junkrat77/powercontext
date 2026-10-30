@@ -862,3 +862,63 @@ def test_reconnect_preserves_capabilities_required_by_stopped_targets(tmp_path, 
                 assert (await status(host, scope, target))["tracking"] == "stopped"
 
     scenario_runner.run(scenario())
+
+
+def test_oversized_normalized_target_is_rejected_without_blocking_sync(tmp_path, scenario_runner):
+    async def scenario():
+        plugin = tmp_path / "expanded.py"
+        plugin.write_text("""from pathlib import Path
+from examples.source_plugins.tickets import Config, capabilities, connector_name, connector_version, definitions, plugin_api_version
+from powercontext.source_management import TargetIdentity
+import asyncio
+async def apply(ctx, config):
+    await asyncio.Event().wait()
+async def identify_target(request, config):
+    return TargetIdentity(target_key="stable", normalized_input={"id": Path(config.file).read_text()})
+""")
+        normalized = tmp_path / "normalized.txt"
+        normalized.write_text("x" * 2_094_552)
+        async with (
+            source_server(tmp_path) as (_app, url, tokens, scope),
+            management(tmp_path, url, tokens) as (_manager, manager_url),
+        ):
+            config = await configured_runtime(
+                tmp_path,
+                url,
+                manager_url,
+                tokens,
+                scope,
+                plugin=str(plugin),
+                config={"file": str(normalized), "poll_interval": 0.1},
+            )
+            async with (
+                running(config),
+                Client(url + "/mcp", auth=tokens["host"]) as host,
+                httpx.AsyncClient(base_url=url, headers={"Authorization": "Bearer " + tokens["deployer"]}) as admin,
+            ):
+                await discover_running(host, scope)
+                args = {
+                    "scope_id": scope,
+                    "instance_id": config.instance_id,
+                    "capability": "tickets.item",
+                    "capability_version": "1",
+                    "input": {"id": "A"},
+                }
+                with pytest.raises(ToolError, match="response-too-large"):
+                    await tool(host, "pc_source_add", args)
+                normalized.write_text("A")
+                added = await tool(host, "pc_source_add", args)
+                assert added["tracking"] == "enabled"
+                stopped = await admin.post(
+                    "/v1/source-management/instance-set-enabled",
+                    json={"instance_id": config.instance_id, "enabled": False},
+                )
+                assert stopped.status_code == 200, stopped.text
+                await wait_until(
+                    lambda: admin.post(
+                        "/v1/source-management/instances", json={"instance_id": config.instance_id, "view": "control"}
+                    ),
+                    lambda r: r.status_code == 200 and r.json()["instances"][0]["actual"] == "stopped",
+                )
+
+    scenario_runner.run(scenario())
