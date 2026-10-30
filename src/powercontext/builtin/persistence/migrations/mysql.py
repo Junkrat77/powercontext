@@ -34,6 +34,8 @@ from alembic.util.exc import CommandError
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import Connection
 
+from powercontext.builtin.persistence.seekdb import SeekDBConfig
+
 from .backup import BackupContext, BackupProvider, BackupRef, ForkBackupProvider
 from .bundle import ALEMBIC_CONTEXT_LOCK, MigrationBundle
 from .connections import BackendIdentity, MaintenanceConnections
@@ -266,10 +268,14 @@ class MySQLMigrationRunner:
         service: dict[str, Any] | None = None,
         shared_database: bool = False,
         _startup: bool = False,
+        require_existing_database: bool = False,
     ) -> MigrationPlan:
         self._assert_unchanged()
-        return self.connections.run(
-            lambda connection, identity, _guard: self._inspect(
+
+        def inspect(
+            connection: Connection | None, identity: BackendIdentity, _guard: Callable[[], None]
+        ) -> MigrationPlan:
+            return self._inspect(
                 connection,
                 identity,
                 backup_policy=backup_policy,
@@ -277,7 +283,10 @@ class MySQLMigrationRunner:
                 shared_database=shared_database,
                 allow_declared_spaces=_startup,
             )
-        )
+
+        if isinstance(self.connections.config, SeekDBConfig) and not require_existing_database:
+            return self.connections.run(inspect, allow_missing_database=True)
+        return self.connections.run(inspect)
 
     def verify(self) -> MigrationResult:
         def verify(

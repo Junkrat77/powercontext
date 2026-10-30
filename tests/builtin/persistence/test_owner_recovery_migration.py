@@ -42,7 +42,11 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
     shutil.copytree(current.directory, directory, ignore=shutil.ignore_patterns("__pycache__"))
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    removed_revisions = ("v1_5_0_001",) if previous_revision == "v1_4_1_004" else ("v1_4_1_004", "v1_5_0_001")
+    removed_revisions = (
+        ("v1_4_1_005", "v1_5_0_001")
+        if previous_revision == "v1_4_1_004"
+        else ("v1_4_1_004", "v1_4_1_005", "v1_5_0_001")
+    )
     for revision in removed_revisions:
         for resource in manifest["revision_resources"].pop(revision):
             (directory / resource).unlink()
