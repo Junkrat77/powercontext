@@ -56,7 +56,7 @@ from powercontext.builtin.persistence.tables import (
     ARTIFACT_PROCESSING_BINDING_STATES_TABLE,
 )
 from powercontext.builtin.runtime.artifact_reads import ArtifactReadSession
-from powercontext.builtin.runtime.config import BuiltinConfig, DatabaseConfig, RuntimeConfig
+from powercontext.builtin.runtime.config import BuiltinConfig, DatabaseConfig, InferenceConfig, RuntimeConfig
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -132,7 +132,11 @@ async def _process_window(spec: ArtifactPluginWorkerSpec, assignment: ArtifactPr
         embedding = None
         if spec.inference_config is not None:
             embedding, _ = await _embedding_models(spec.inference_config, resources, None)
-        config = BuiltinConfig(database=spec.database, runtime=spec.runtime_config or RuntimeConfig())
+        config = BuiltinConfig(
+            database=spec.database,
+            inference=spec.inference_config or InferenceConfig(),
+            runtime=spec.runtime_config or RuntimeConfig(),
+        )
         storage = await resources.enter_async_context(
             open_builtin_contexts(config, embedding_model=embedding, _topic_memory_worker=True)
         )
