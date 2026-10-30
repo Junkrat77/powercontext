@@ -12,17 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Register trusted Source write plugins in the managed Server schema."""
+"""Register Source write plugins through the shared DDL executor."""
 
-import json
-from pathlib import Path
+from alembic import context
 
-from alembic import op
-
-revision = "v1_4_1_005"
-down_revision = "v1_4_1_004"
+revision = "v1_4_1_006"
+down_revision = "v1_4_1_005"
 
 
-def upgrade():
-    resource = Path(__file__).parents[1] / "schemas/sqlite-v1_4_1_005.json"
-    op.get_bind().exec_driver_sql(json.loads(resource.read_text())["create"])
+def upgrade() -> None:
+    context.config.attributes["execute_revision"](revision)

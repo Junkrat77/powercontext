@@ -45,8 +45,8 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
     original_evidence = json.loads(old.evidence_path.read_text(encoding="utf-8"))
     upgraded = SQLiteMigrationRunner(database, current, configuration=configuration(embedding))
     plan = upgraded.plan()
-    assert plan.source_revision == "s1402" and plan.revisions == ("v1_4_1_004", "v1_4_1_005")
-    assert apply(upgraded).revision == "v1_4_1_005"
+    assert plan.source_revision == "s1402" and plan.revisions == ("v1_4_1_004", "v1_4_1_005", "v1_4_1_006")
+    assert apply(upgraded).revision == "v1_4_1_006"
     assert upgraded.verify().state == "ready"
     assert not apply(upgraded).changed
     evidence = json.loads(upgraded.evidence_path.read_text(encoding="utf-8"))
