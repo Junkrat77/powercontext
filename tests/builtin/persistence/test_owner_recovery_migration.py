@@ -32,7 +32,7 @@ from tests.builtin.persistence.test_portable_storage_migration import apply, con
 
 
 @pytest.mark.parametrize("vectors", [False, True])
-@pytest.mark.parametrize("previous_revision", ["s1402", "v1_4_1_004"])
+@pytest.mark.parametrize("previous_revision", ["s1402", "v1_4_1_004", "v1_4_1_006"])
 def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checksums(
     tmp_path, vectors, previous_revision
 ):
@@ -43,9 +43,11 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     removed_revisions = (
-        ("v1_4_1_005", "v1_5_0_001")
+        ("v1_5_0_001",)
+        if previous_revision == "v1_4_1_006"
+        else ("v1_4_1_005", "v1_4_1_006", "v1_5_0_001")
         if previous_revision == "v1_4_1_004"
-        else ("v1_4_1_004", "v1_4_1_005", "v1_5_0_001")
+        else ("v1_4_1_004", "v1_4_1_005", "v1_4_1_006", "v1_5_0_001")
     )
     for revision in removed_revisions:
         for resource in manifest["revision_resources"].pop(revision):
@@ -58,6 +60,8 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
         manifest["mysql_state_layouts"].remove(f"schemas/mysql-{revision}.json")
     manifest["domain_steps"] = [step for step in manifest["domain_steps"] if step["revision"] not in removed_revisions]
     (directory / "artifact_storage_readiness.py").unlink()
+    if previous_revision != "v1_4_1_006":
+        manifest["affected_objects"].remove("pc_source_write_plugins")
     if previous_revision == "s1402":
         manifest["affected_objects"].remove("pc_access_owner_recovery")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -70,6 +74,8 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
             "INSERT INTO pc_scopes (scope_id,title,summary,scope_id_search,title_search,summary_search,version) "
             "VALUES ('original','title','summary','original','title','summary',1)"
         )
+        if previous_revision == "v1_4_1_006":
+            connection.execute("INSERT INTO pc_source_write_plugins VALUES (?, ?)", ("tickets", b"retained definition"))
         if previous_revision == "v1_4_1_004":
             connection.execute(
                 "INSERT INTO pc_access_owner_recovery (operation_id,deployment_id,scope_id,completed,payload) "
@@ -94,6 +100,8 @@ def test_registered_owner_recovery_upgrade_preserves_history_and_revision_checks
             connection.execute("SELECT operation_id,payload,completed FROM pc_access_owner_recovery").fetchall()
             == expected_intents
         )
+        expected_plugins = [("tickets", b"retained definition")] if previous_revision == "v1_4_1_006" else []
+        assert connection.execute("SELECT * FROM pc_source_write_plugins").fetchall() == expected_plugins
         assert connection.execute("SELECT COUNT(*) FROM pc_artifact_family_schemas").fetchone() == (0,)
     fresh = SQLiteMigrationRunner(tmp_path / "fresh.db", current, configuration=configuration(embedding))
     apply(fresh)

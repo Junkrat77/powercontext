@@ -65,6 +65,8 @@ def test_mysql_vector_admission_retains_description_and_exact_previous_revision(
                         del inventory["tables"][name]
                     else:
                         inventory["tables"][name] = table
+    # Inspect the description revision before the subsequent Source registration table.
+    del inventory["tables"]["pc_source_write_plugins"]
     for name, sql in vector.vector_profile.mysql_tables().items():
         if name == "pc_atomic_memory_current":
             sql = sql.replace(
@@ -101,7 +103,7 @@ def test_description_upgrade_preserves_registered_owner_recovery_and_evidence(tm
     shutil.copytree(current.snapshot_directory, directory, ignore=shutil.ignore_patterns("__pycache__"))
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    removed_revisions = ("v1_4_1_005", "v1_5_0_001")
+    removed_revisions = ("v1_4_1_005", "v1_4_1_006", "v1_5_0_001")
     for revision in removed_revisions:
         for resource in manifest["revision_resources"].pop(revision):
             (directory / resource).unlink()
@@ -113,6 +115,7 @@ def test_description_upgrade_preserves_registered_owner_recovery_and_evidence(tm
         manifest["mysql_state_layouts"].remove(f"schemas/mysql-{revision}.json")
     manifest["domain_steps"] = [step for step in manifest["domain_steps"] if step["revision"] not in removed_revisions]
     (directory / "artifact_storage_readiness.py").unlink()
+    manifest["affected_objects"].remove("pc_source_write_plugins")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     previous = MigrationBundle(directory, embedding_profile=profile)
     configuration = {

@@ -595,6 +595,12 @@
     ],
     [
       "table",
+      "pc_source_write_plugins",
+      "pc_source_write_plugins",
+      "CREATE TABLE pc_source_write_plugins (\n\tplugin_id VARCHAR(128) NOT NULL, \n\tdefinition BLOB NOT NULL, \n\tPRIMARY KEY (plugin_id)\n)"
+    ],
+    [
+      "table",
       "pc_sources",
       "pc_sources",
       "CREATE TABLE pc_sources (\n\tscope_id VARCHAR(256) NOT NULL, \n\tsource_type VARCHAR(128) NOT NULL, \n\tsource_id VARCHAR(256) NOT NULL, \n\tpayload BLOB NOT NULL, \n\tjournal_position BIGINT NOT NULL, \n\tPRIMARY KEY (scope_id, source_type, source_id), \n\tCONSTRAINT uq_pc_sources_scope_journal_position UNIQUE (scope_id, journal_position)\n)"
