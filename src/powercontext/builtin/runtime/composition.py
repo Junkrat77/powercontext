@@ -922,7 +922,7 @@ async def open_builtin_runtime(  # noqa: C901
                 atomic_memory_application=contexts.atomic_memory,
                 artifact_merge_application=_artifact_merge_application(contexts, config.runtime),
                 prompt_service=contexts.prompts,
-                recall_token_estimator=contexts.estimate_recall_tokens,
+                offer_recall_tokens=contexts.recall_accounting.offer,
                 recall_effort_sink=recall_effort_sink,
                 decision_model=configured_decision,
                 publication_application=contexts.publications,

@@ -197,9 +197,9 @@ MCP 使用 stateless Streamable HTTP，每次工具执行都采用当前请求�
 | `POWERCONTEXT_SERVER_RUNTIME_MEMORY_WORKER_TIMEOUT_SECONDS` | `600` | Memory Scope 总超时 |
 | `POWERCONTEXT_SERVER_RUNTIME_EXPERIENCE_WORKER_TIMEOUT_SECONDS` | `600` | Experience Scope 总超时 |
 | `POWERCONTEXT_SERVER_RUNTIME_PROFILE_WORKER_TIMEOUT_SECONDS` | `600` | Profile Scope 总超时 |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_QUEUE_CAPACITY` | `256` | 每个 Runtime 排队的模型用量记录数，不含正在写入的批次；超出的记录会被丢弃并留下诊断日志 |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_WRITE_TIMEOUT_SECONDS` | `1` | 每个用量批次的总写入预算；只有确认未应用的尝试才可在剩余预算内重试 |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_FLUSH_TIMEOUT_SECONDS` | `0.5` | 统计读取和显式 flush 等待本进程已接收用量的有界时长；普通请求不等待 |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_QUEUE_CAPACITY` | `256` | 每个 Runtime 的模型用量与召回 token 队列各自的上限，正在处理的工作另计。超出上限时丢弃记录并留下诊断 |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_WRITE_TIMEOUT_SECONDS` | `1` | 每个模型用量批次或召回 token 任务的总写入预算。召回 token 的证据读取有相同时长的独立预算。只有确认未生效的写入可重试 |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_FLUSH_TIMEOUT_SECONDS` | `0.5` | 统计读取等待本进程队列中已接收记录的有界时长。显式刷新模型用量使用相同预算 |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL` | 未设置 | 配置的 extraction、generation、Handoff 和 rerank 操作共用的 Pydantic AI 模型 |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_BASE_URL` | provider 默认值 | 自定义 generation provider base URL |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_HEADERS` | `{}` | generation client 静态 header JSON object；value 按 secret 处理 |

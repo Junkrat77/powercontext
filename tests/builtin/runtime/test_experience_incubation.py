@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -28,9 +29,12 @@ from powercontext.builtin.runtime import (
     BuiltinConfigurationError,
     BuiltinRuntime,
     CaptureSource,
+    ExperienceIncubationResult,
     GetExperienceRequest,
     ListCandidatesRequest,
+    RuntimeCapabilities,
     RuntimeConfig,
+    open_builtin_contexts,
     open_builtin_runtime,
 )
 from powercontext.builtin.scope import ScopeDraft
@@ -67,12 +71,129 @@ class _TaskOutcomePipeline:
         )
 
 
+class _PausedTaskOutcomePipeline(_TaskOutcomePipeline):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.resume = asyncio.Event()
+
+    async def incubate(self, sources: tuple[Source, ...], /) -> tuple[ExperienceCandidateInput, ...]:
+        self.started.set()
+        await self.resume.wait()
+        return await super().incubate(sources)
+
+
 async def _create_scope(runtime: BuiltinRuntime, idempotency_key: str) -> str:
     assert runtime.scopes is not None
     scope = await runtime.scopes.create(
         ScopeDraft(title="Experience Test", summary="Experience incubation test", idempotency_key=idempotency_key)
     )
     return scope.scope_id
+
+
+def test_capture_during_incubation_preserves_the_selected_window(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = _PausedTaskOutcomePipeline()
+        commit_started = asyncio.Event()
+        resume_commit = asyncio.Event()
+
+        async def pause_commit(_connection, _candidates) -> None:
+            commit_started.set()
+            await resume_commit.wait()
+
+        database = SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'experience.db'}", busy_timeout_ms=50)
+        async with open_builtin_runtime(
+            BuiltinConfig(database=database),
+            experience_pipeline=pipeline,
+            dispatch_processing=False,
+        ) as runtime:
+            scope = await _create_scope(runtime, "concurrent-capture")
+            sources = runtime.sources.for_scope(scope)
+            experience = runtime.experience.for_scope(scope)
+            original = await sources.capture(
+                CaptureSource(source_id="original", content="First check passed.", metadata={"kind": "task-outcome"})
+            )
+            async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+                incubation = tasks.create_task(experience.incubate(on_commit=pause_commit))
+                await pipeline.started.wait()
+                during_model = await sources.capture(
+                    CaptureSource(source_id="model", content="Second check passed.", metadata={"kind": "task-outcome"})
+                )
+                pipeline.resume.set()
+
+                await commit_started.wait()
+                capture = tasks.create_task(
+                    sources.capture(
+                        CaptureSource(
+                            source_id="commit", content="Third check passed.", metadata={"kind": "task-outcome"}
+                        )
+                    )
+                )
+                done, _ = await asyncio.wait((capture,), timeout=0.5)
+                assert not done
+                resume_commit.set()
+
+            first = incubation.result()
+            during_commit = capture.result()
+            following = await experience.incubate()
+            inbox = await runtime.review.for_scope(scope).list(ListCandidatesRequest(family="experience"))
+
+            assert first.previous_cursor == 0
+            assert first.current_cursor == first.high_watermark == original.sequence
+            assert first.candidate_count == 1
+            assert (following.previous_cursor, following.current_cursor) == (original.sequence, during_commit.sequence)
+            assert following.candidate_count == 2
+            evidence = {candidate.candidate_id: candidate.sources for candidate in inbox.candidates}
+            assert evidence[first.candidate_ids[0]] == (original.source_ref,)
+            assert {evidence[candidate_id][0].source_id for candidate_id in following.candidate_ids} == {
+                during_model.source_ref.source_id,
+                during_commit.source_ref.source_id,
+            }
+
+    asyncio.run(scenario())
+
+
+def test_injected_incubator_keeps_same_scope_calls_serialized() -> None:
+    async def scenario() -> None:
+        position = 0
+        first_entered = asyncio.Event()
+        resume_first = asyncio.Event()
+
+        async def incubator(_scope: str, limit: int, /) -> ExperienceIncubationResult:
+            nonlocal position
+            previous = position
+            if limit == 1:
+                first_entered.set()
+                await resume_first.wait()
+            position = previous + 1
+            return ExperienceIncubationResult(
+                previous_cursor=previous,
+                high_watermark=position,
+                current_cursor=position,
+                source_count=1,
+                candidate_count=0,
+            )
+
+        async with (
+            open_builtin_contexts(BuiltinConfig(database=SQLiteConfig())) as contexts,
+            BuiltinRuntime(
+                provider=contexts,
+                scope_application=contexts.scopes,
+                capabilities=RuntimeCapabilities(memory_extraction=False, memory_search_modes=()),
+                experience_incubator=incubator,
+            ) as runtime,
+        ):
+            experience = runtime.experience.for_scope(await _create_scope(runtime, "custom-incubator"))
+            async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+                first = tasks.create_task(experience.incubate(limit=1))
+                await first_entered.wait()
+                second = tasks.create_task(experience.incubate(limit=2))
+                await asyncio.wait((second,), timeout=0.5)
+                resume_first.set()
+            assert (first.result().previous_cursor, first.result().current_cursor) == (0, 1)
+            assert (second.result().previous_cursor, second.result().current_cursor) == (1, 2)
+
+    asyncio.run(scenario())
 
 
 def test_incubation_uses_an_independent_cursor_and_keeps_candidates_gated() -> None:

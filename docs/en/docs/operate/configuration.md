@@ -212,9 +212,9 @@ still occupies an HTTP slot until it finishes; reserve other slots for concurren
 | `POWERCONTEXT_SERVER_RUNTIME_MEMORY_WORKER_TIMEOUT_SECONDS` | `600` | Total Memory Scope timeout |
 | `POWERCONTEXT_SERVER_RUNTIME_EXPERIENCE_WORKER_TIMEOUT_SECONDS` | `600` | Total Experience Scope timeout |
 | `POWERCONTEXT_SERVER_RUNTIME_PROFILE_WORKER_TIMEOUT_SECONDS` | `600` | Total Profile Scope timeout |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_QUEUE_CAPACITY` | `256` | Queued model-usage records per Runtime, excluding its in-flight batch; further records are dropped with a diagnostic |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_WRITE_TIMEOUT_SECONDS` | `1` | Total write budget per usage batch; only provably unapplied attempts may retry within it |
-| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_FLUSH_TIMEOUT_SECONDS` | `0.5` | Bounded wait for already-accepted local usage at statistics reads and explicit flush boundaries; ordinary requests do not wait |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_QUEUE_CAPACITY` | `256` | Per-Runtime limit for each of the separate model-usage and recall-token queues, excluding in-flight work. Overflow drops records with a diagnostic |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_WRITE_TIMEOUT_SECONDS` | `1` | Total write budget per model-usage batch or recall-token job. Recall-token evidence reads have a separate budget of the same duration. Only provably unapplied writes can retry |
+| `POWERCONTEXT_SERVER_RUNTIME_MODEL_USAGE_FLUSH_TIMEOUT_SECONDS` | `0.5` | Bounded wait for already-accepted records in the local queues at statistics reads. Explicit model-usage flushes use the same budget |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL` | unset | Pydantic AI model used by configured extraction, generation, Handoff, and reranking operations |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_BASE_URL` | provider default | Custom generation provider base URL |
 | `POWERCONTEXT_SERVER_INFERENCE_GENERATION_HEADERS` | `{}` | JSON object of static generation client headers; values are secrets |

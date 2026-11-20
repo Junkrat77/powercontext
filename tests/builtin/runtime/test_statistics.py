@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 from powercontext.artifacts import ArtifactRef
 from powercontext.builtin.artifacts.atomic_memory import AtomicMemoryContent
@@ -58,9 +61,11 @@ from powercontext.builtin.runtime import (
     PrepareContextRequest,
     PreparedContext,
     ProposeExperienceRequest,
+    RuntimeConfig,
     StatisticsPeriod,
     open_builtin_runtime,
 )
+from powercontext.builtin.runtime.recall import RelationalRecallTokenEstimator
 from powercontext.builtin.scope import ScopeDraft, ScopeSelection
 from powercontext.builtin.statistics import MAX_RECURRENCE_TOP_REVISIONS
 from powercontext.sources import SourceRef
@@ -194,6 +199,104 @@ def test_scoped_statistics_reports_current_inventory_and_recall_reduction() -> N
             result.recall.totals.baseline_tokens - result.recall.totals.recalled_tokens
         )
         assert result.recall.totals.token_reduction < 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("boundary", ["overview", "shutdown"])
+def test_prepare_returns_before_recall_accounting_and_drains_at_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: Literal["overview", "shutdown"]
+) -> None:
+    original = RelationalRecallTokenEstimator.estimate
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        database = tmp_path / "recall-accounting.db"
+        config = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{database}"))
+        result = None
+
+        async def paused_estimate(self, build):
+            started.set()
+            await release.wait()
+            return await original(self, build)
+
+        monkeypatch.setattr(RelationalRecallTokenEstimator, "estimate", paused_estimate)
+        async with open_builtin_runtime(config, dispatch_processing=False) as runtime:
+            scope_id = await _create_scope(runtime, "recall-accounting")
+            captured = await runtime.sources.for_scope(scope_id).capture(
+                CaptureSource(source_id="proof", content="Contract check passed.", metadata={})
+            )
+            candidate = await runtime.experience.for_scope(scope_id).propose(
+                ProposeExperienceRequest(
+                    proposal=ExperienceContent(
+                        situation="A contract changed.",
+                        action="Run the fixtures.",
+                        outcome="All tests passed.",
+                        lesson="Run the fixtures after contract changes.",
+                    ),
+                    sources=(captured.source_ref,),
+                )
+            )
+            await runtime.review.for_scope(scope_id).approve(
+                ApproveCandidateRequest(candidate_id=candidate.candidate_id, expected_version=candidate.version)
+            )
+            try:
+                prepared = await asyncio.wait_for(
+                    runtime.context.for_scope(scope_id).prepare(PrepareContextRequest(query="contract")),
+                    timeout=5,
+                )
+                await asyncio.wait_for(started.wait(), timeout=5)
+                assert isinstance(prepared, PreparedContext) and prepared.content is not None
+            finally:
+                release.set()
+            if boundary == "overview":
+                result = await runtime.statistics.for_scope(scope_id).overview(period=StatisticsPeriod.TODAY)
+
+        if boundary == "shutdown":
+            async with open_builtin_runtime(config, dispatch_processing=False) as restored:
+                result = await restored.statistics.for_scope(scope_id).overview(period=StatisticsPeriod.TODAY)
+        assert result is not None
+        estimator = character_token_estimator()
+        assert result.recall.totals.preparations == result.recall.totals.comparable_preparations == 1
+        assert result.recall.totals.baseline_tokens == estimator.estimate("Contract check passed.")
+        assert result.recall.totals.recalled_tokens == estimator.estimate(prepared.content)
+
+    asyncio.run(scenario())
+
+
+def test_recall_accounting_shutdown_returns_within_bounded_budget_when_consumer_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stalled_estimate(self, build):
+            started.set()
+            await release.wait()
+            return None
+
+        monkeypatch.setattr(RelationalRecallTokenEstimator, "estimate", stalled_estimate)
+        runtime_cm = open_builtin_runtime(
+            BuiltinConfig(
+                database=SQLiteConfig(),
+                runtime=RuntimeConfig(
+                    model_usage_write_timeout_seconds=0.1,
+                    model_usage_flush_timeout_seconds=0.05,
+                ),
+            ),
+            dispatch_processing=False,
+        )
+        runtime = await runtime_cm.__aenter__()
+        try:
+            scope_id = await _create_scope(runtime, "recall-stalled-shutdown")
+            await runtime.context.for_scope(scope_id).prepare(PrepareContextRequest(query="anything"))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(runtime_cm.__aexit__(None, None, None), timeout=1)
+        finally:
+            release.set()
+            await asyncio.sleep(0)
 
     asyncio.run(scenario())
 
