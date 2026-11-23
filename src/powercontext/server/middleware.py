@@ -52,13 +52,21 @@ _PLUGIN_ASSET = re.compile(r"^/dashboard/plugins/[a-z][a-z0-9-]*/ui/")
 class AuthenticationMiddleware:
     """Authenticate every protected external HTTP request through one Provider."""
 
-    def __init__(self, app: ASGIApp, *, provider: AuthenticationProvider, dashboard_enabled: bool = False) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        provider: AuthenticationProvider,
+        dashboard_enabled: bool = False,
+        gateway_custom_auth: bool = False,
+    ) -> None:
         self.app = app
         self._provider = provider
         self._dashboard_enabled = dashboard_enabled
+        self._gateway_custom_auth = gateway_custom_auth
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if is_internal_bridge() or _is_public(scope):
+        if is_internal_bridge() or _is_public(scope) or (self._gateway_custom_auth and _is_gateway_chat(scope)):
             await self.app(scope, receive, send)
             return
         try:
@@ -127,6 +135,10 @@ def _is_public(scope: Scope) -> bool:
         or scope["path"] == "/dashboard/plugins/_client.js"
         or _PLUGIN_ASSET.match(scope["path"]) is not None
     )
+
+
+def _is_gateway_chat(scope: Scope) -> bool:
+    return scope["type"] == "http" and scope["path"] in {"/gateway/v1/chat/completions", "/gateway/chat/completions"}
 
 
 def _client_host(scope: Scope) -> str | None:

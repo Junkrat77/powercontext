@@ -279,6 +279,7 @@ from powercontext.builtin.runtime.protocols import (
     RuntimeTracing,
     TraceAttribute,
 )
+from powercontext.builtin.runtime.query_rewrite import ExperienceQueryRewriter
 from powercontext.builtin.runtime.readiness import (
     ReadinessCheckStatus,
     RuntimeReadiness,
@@ -1403,6 +1404,7 @@ class ScopedContextApplication:
         # One budget covers every query embedding this preparation waits for. Each search gets what the earlier ones
         # left, so the waits cannot add up past it however many Scopes and families are searched.
         embedding_budget = _EmbeddingBudget(self._runtime.recall_embedding_timeout_seconds)
+        experience_query = await self._experience_query_for(request.query, families)
         round_zero = await self._recall_round(
             request,
             scope_ids,
@@ -1413,6 +1415,7 @@ class ScopedContextApplication:
             topic_reuse=topic_reuse,
             embedding_budget=embedding_budget,
             excluded_memory=injected_memory_keys,
+            experience_query=experience_query,
         )
         evidence = current_receipt_evidence()
         if evidence is not None:
@@ -1445,6 +1448,7 @@ class ScopedContextApplication:
                 embedding_budget=embedding_budget,
                 round_zero=round_zero,
                 excluded_memory=injected_memory_keys,
+                experience_query=experience_query,
             )
         if evidence is not None:
             evidence.round = 0
@@ -1690,6 +1694,7 @@ class ScopedContextApplication:
         embedding_budget: _EmbeddingBudget,
         round_zero: _RecallRoundOutcome,
         excluded_memory: frozenset[tuple[object, ...]],
+        experience_query: str,
     ) -> tuple[
         list[PreparedMemoryCandidates],
         list[PreparedExperienceCandidates],
@@ -1783,6 +1788,7 @@ class ScopedContextApplication:
                     topic_reuse=topic_reuse,
                     embedding_budget=embedding_budget,
                     excluded_memory=excluded_memory,
+                    experience_query=experience_query,
                 )
                 memory_ranks: dict[Any, int] = {}
                 for group in issued.memory:
@@ -1941,6 +1947,12 @@ class ScopedContextApplication:
             ),
         )
 
+    async def _experience_query_for(self, query: str, families: set[str], /) -> str:
+        rewriter = self._runtime._experience_query_rewriter
+        if EXPERIENCE_FAMILY not in families or rewriter is None:
+            return query
+        return await rewriter.rewrite(query)
+
     async def _recall_round(
         self,
         request: PrepareContextRequest,
@@ -1953,6 +1965,7 @@ class ScopedContextApplication:
         topic_reuse: dict[str, MemoryQueryEmbedding | None],
         embedding_budget: _EmbeddingBudget,
         excluded_memory: frozenset[tuple[object, ...]],
+        experience_query: str | None = None,
     ) -> _RecallRoundOutcome:
         memory_candidates: list[PreparedMemoryCandidates] = []
         experience_candidates: list[PreparedExperienceCandidates] = []
@@ -1979,6 +1992,7 @@ class ScopedContextApplication:
                 reuse=reuse.get(scope_id, shared_embedding),
                 allow_embedding=scope_id not in reuse or reuse[scope_id] is not None,
                 embedding_budget=embedding_budget,
+                experience_query=request.query if experience_query is None else experience_query,
             )
             memory_recoverable |= outcome.memory_recoverable
             degradation = _degradation(degradation, outcome.memory_embedding_fallback)
@@ -2074,6 +2088,7 @@ class ScopedContextApplication:
         reuse: MemoryQueryEmbedding | None,
         allow_embedding: bool = True,
         embedding_budget: _EmbeddingBudget,
+        experience_query: str | None = None,
     ) -> _ScopeRecallOutcome:
         evidence = current_receipt_evidence()
         async with self._runtime._scoped_operation(scope_id, embedding_purpose=ModelUsagePurpose.MEMORY_RECALL):
@@ -2139,7 +2154,12 @@ class ScopedContextApplication:
                 )
 
             experience_outcome = await self._recall_experience(
-                scope_id, request.query, experience_limit, admission, evidence, experience_requested
+                scope_id,
+                request.query if experience_query is None else experience_query,
+                experience_limit,
+                admission,
+                evidence,
+                experience_requested,
             )
         return _ScopeRecallOutcome(
             memory=PreparedMemoryCandidates(
@@ -4271,6 +4291,7 @@ class BuiltinRuntime:
         offer_recall_tokens: RecallTokenOffer | None = None,
         recall_effort_sink: RecallEffortSink | None = None,
         decision_model: DecisionModel | None = None,
+        experience_query_rewriter: ExperienceQueryRewriter | None = None,
         publication_application: ArtifactPublicationApplication | None = None,
         scope_application: ScopeApplication | None = None,
         readiness: RuntimeReadinessChecks | None = None,
@@ -4366,6 +4387,7 @@ class BuiltinRuntime:
         # Public read-only seam for the cross-family decision role; deterministic Runtime callers
         # (and tests) read it directly, and it is always fail-open wrapped before it gets here.
         self.decision_model = decision_model
+        self._experience_query_rewriter = experience_query_rewriter
         self.publications = publication_application
         self.scopes = scope_application
         self._scope_operations: dict[tuple[asyncio.Task[Any] | None, str], ScopeDescriptor] = {}

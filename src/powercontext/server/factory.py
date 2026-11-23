@@ -26,6 +26,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request, Response
 from prometheus_client.exposition import choose_encoder
 from starlette.middleware import Middleware
@@ -60,6 +61,7 @@ from powercontext.builtin.persistence.records import RelationalRecordService
 from powercontext.builtin.persistence.sqlite import SQLiteConfig
 from powercontext.builtin.runtime import (
     BuiltinRuntime,
+    ExperienceQueryRewriter,
 )
 from powercontext.builtin.runtime.composition import open_builtin_runtime
 from powercontext.builtin.runtime.config import BuiltinConfig
@@ -96,6 +98,11 @@ from powercontext.server.context import current_principal, current_request_id
 from powercontext.server.cursor_secret import resolve_cursor_secret
 from powercontext.server.dashboard import mount_dashboard
 from powercontext.server.dream_access import DreamAccess
+from powercontext.server.gateway_proxy import (
+    ExperienceChatGateway,
+    mount_experience_chat_gateway,
+    open_gateway_http_client,
+)
 from powercontext.server.http_limits import HttpAdmissionMiddleware, HttpRequestBodyLimitMiddleware
 from powercontext.server.identity import ServerIdentityRepository
 from powercontext.server.info import server_info
@@ -159,6 +166,8 @@ def create_server_app(  # noqa: C901
     external_skill_provider: ExternalSkillProvider | None = None,
     handoff_pipeline: HandoffGenerationPipeline | None = None,
     embedding_model: EmbeddingModel | None = None,
+    experience_query_rewriter: ExperienceQueryRewriter | None = None,
+    gateway_http_client: httpx.AsyncClient | None = None,
     middleware: Sequence[Middleware] = (),
     tracing: ServerTracing | None = None,
     access_control: AccessControlService | None = None,
@@ -289,6 +298,7 @@ def create_server_app(  # noqa: C901
                     external_skill_provider=external_skill_provider,
                     handoff_pipeline=handoff_pipeline,
                     embedding_model=embedding_model,
+                    experience_query_rewriter=experience_query_rewriter,
                     instrumentation=resolved_tracing.instrumentation,
                     scope_cache_observer=None if metrics is None else metrics.set_runtime_scopes,
                     topic_memory_search_observer=None if metrics is None else metrics.observe_topic_memory_search,
@@ -396,6 +406,9 @@ def create_server_app(  # noqa: C901
                 await _remove_legacy_topic_owners(active_access_control)
             readiness_probe.bind(runtime)
             app.state.plugin_api_max_body_bytes = resolved.plugin_api_max_body_bytes
+            app.state.gateway_http_client = await _enter_gateway_client(
+                resources, resolved.gateway, gateway_http_client
+            )
             app.state.application = runtime
             app.state.dashboard_runtime = runtime
             app.state.access_control = active_access_control
@@ -425,6 +438,7 @@ def create_server_app(  # noqa: C901
                 _log_lifecycle("server.stopping", "PowerContext Server is stopping")
                 readiness_probe.unbind()
                 app.state.plugin_manager = None
+                app.state.gateway_http_client = None
                 app.state.application = None
                 app.state.dashboard_runtime = None
                 app.state.capability_provider = None
@@ -461,6 +475,7 @@ def create_server_app(  # noqa: C901
                 AuthenticationMiddleware,
                 provider=configured_authentication,
                 dashboard_enabled=resolved.dashboard.enabled,
+                gateway_custom_auth=resolved.gateway.enabled and resolved.gateway.api_key is not None,
             ),
         )
 
@@ -480,6 +495,14 @@ def create_server_app(  # noqa: C901
     # wraps it so early rejections retain the same correlation and observations.
     app.add_middleware(HttpAdmissionMiddleware, max_concurrent_requests=resolved.http.max_concurrent_requests)
     app.add_middleware(HttpRequestIdMiddleware)
+    skip_paths = (
+        "/health/live",
+        "/health/ready",
+        "/metrics",
+        resolved.mcp.path,
+        "/gateway/v1/chat/completions",
+        "/gateway/chat/completions",
+    )
     if metrics is not None:
         app.add_api_route(
             "/metrics",
@@ -491,20 +514,25 @@ def create_server_app(  # noqa: C901
             HttpMetricsMiddleware,
             metrics=metrics,
             operations=operations,
-            skip_paths=("/health/live", "/health/ready", "/metrics", resolved.mcp.path),
+            skip_paths=skip_paths,
         )
     if resolved.logging.access:
         app.add_middleware(
             HttpAccessLogMiddleware,
-            skip_paths=("/health/live", "/health/ready", "/metrics", resolved.mcp.path),
+            skip_paths=skip_paths,
             operations=http_operations(app.routes),
         )
     app.add_middleware(
         HttpTracingMiddleware,
         tracing=resolved_tracing,
         operations=http_operations(app.routes),
-        skip_paths=("/health/live", "/health/ready", "/metrics", resolved.mcp.path),
+        skip_paths=skip_paths,
     )
+    if resolved.gateway.enabled:
+        mount_experience_chat_gateway(
+            app,
+            ExperienceChatGateway(resolved.gateway, client=gateway_http_client),
+        )
     if resolved.mcp.enabled:
         mount_mcp(
             app,
@@ -519,6 +547,18 @@ def create_server_app(  # noqa: C901
         app.state.dashboard_runtime_configuration = runtime_configuration(config)
         mount_dashboard(app)
     return app
+
+
+async def _enter_gateway_client(
+    resources: AsyncExitStack,
+    config: Any,
+    injected: httpx.AsyncClient | None,
+) -> httpx.AsyncClient | None:
+    if not config.enabled:
+        return None
+    if injected is not None:
+        return injected
+    return await resources.enter_async_context(open_gateway_http_client(config))
 
 
 def _upgrade_security(settings, access, legacy_static_principal, *, injected: bool) -> dict[str, Any] | None:

@@ -40,6 +40,7 @@ from powercontext.builtin.runtime.config import (
     RuntimeConfig,
 )
 from powercontext.paths import default_database_path, default_seekdb_path, powercontext_data_dir, sqlite_url
+from powercontext.server.gateway_proxy import GatewayChatProxyConfig
 from powercontext.transport import is_loopback_host
 
 _UNSAFE_BIND_MESSAGE = (
@@ -262,6 +263,7 @@ class ServerSettings(BaseSettings):
     handoff_report: HandoffReportConfig = Field(default_factory=HandoffReportConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     external_skills: ExternalSkillsConfig = Field(default_factory=ExternalSkillsConfig)
+    gateway: GatewayChatProxyConfig = Field(default_factory=GatewayChatProxyConfig)
 
     @classmethod
     @override
@@ -413,6 +415,7 @@ __all__ = [
     "AccessControlConfig",
     "BearerAuthConfig",
     "DashboardConfig",
+    "GatewayChatProxyConfig",
     "HandoffReportConfig",
     "HttpConfig",
     "McpConfig",

@@ -210,6 +210,13 @@ from powercontext.builtin.runtime.processing_registry import (
     processing_capabilities,
 )
 from powercontext.builtin.runtime.protocols import RuntimeTracing
+from powercontext.builtin.runtime.query_rewrite import (
+    EXPERIENCE_QUERY_REWRITE_INSTRUCTIONS,
+    ExperienceQueryRewriteInput,
+    ExperienceQueryRewriteOutput,
+    ExperienceQueryRewriter,
+    LLMExperienceQueryRewriter,
+)
 from powercontext.builtin.runtime.readiness import (
     CachedReadinessProbe,
     ReadinessProbe,
@@ -548,6 +555,7 @@ async def open_builtin_runtime(  # noqa: C901
     token_estimator: TokenEstimator | None = None,
     memory_reranker: MemoryReranker | None = None,
     decision_model: DecisionModel | None = None,
+    experience_query_rewriter: ExperienceQueryRewriter | None = None,
     decision_request_sanitizer: DecisionRequestProjectionSanitizer | None = None,
     memory_write_gate: MemoryWriteGate | None = None,
     instrumentation: InstrumentationSettings | None = None,
@@ -699,6 +707,16 @@ async def open_builtin_runtime(  # noqa: C901
             configured_decision,
             config.runtime,
             resolved_decision_request_sanitizer,
+        )
+        configured_query_rewriter = (
+            experience_query_rewriter
+            if experience_query_rewriter is not None
+            else await _open_experience_query_rewriter(
+                config.inference,
+                config.runtime,
+                resources=resources,
+                instrumentation=instrumentation,
+            )
         )
         if embedding_model is None:
             configured_embedding_source, readiness_embedding = await _embedding_models(
@@ -925,6 +943,7 @@ async def open_builtin_runtime(  # noqa: C901
                 offer_recall_tokens=contexts.recall_accounting.offer,
                 recall_effort_sink=recall_effort_sink,
                 decision_model=configured_decision,
+                experience_query_rewriter=configured_query_rewriter,
                 publication_application=contexts.publications,
                 scope_application=contexts.scopes,
                 readiness=RuntimeReadinessChecks(
@@ -1904,6 +1923,49 @@ async def _generation_pipelines(
         generation_readiness,
         rerank_readiness,
         decision_readiness,
+    )
+
+
+async def _open_experience_query_rewriter(
+    settings: InferenceConfig,
+    runtime: RuntimeConfig,
+    *,
+    resources: AsyncExitStack,
+    instrumentation: InstrumentationSettings | None,
+) -> ExperienceQueryRewriter | None:
+    if not runtime.experience_query_rewrite_enabled or settings.generation_model is None:
+        return None
+
+    from pydantic_ai.settings import ModelSettings
+
+    from powercontext.builtin.inference.pydantic_ai import InferenceLimits, PydanticAIStructuredGenerator
+
+    _, model = await _open_pydantic_ai_model(
+        settings.generation_model,
+        base_url=settings.generation_base_url,
+        headers=settings.generation_headers,
+        resources=resources,
+        instrumentation=instrumentation,
+        streaming=settings.generation_streaming,
+        stream_idle_timeout_seconds=settings.generation_stream_idle_timeout_seconds,
+        protection=settings.protection,
+    )
+    request_settings = cast(ModelSettings, dict(settings.generation_model_settings)) or None
+    generator = PydanticAIStructuredGenerator(
+        model=model,
+        instructions=EXPERIENCE_QUERY_REWRITE_INSTRUCTIONS,
+        input_type=ExperienceQueryRewriteInput,
+        output_type=ExperienceQueryRewriteOutput,
+        limits=InferenceLimits(
+            timeout_seconds=runtime.experience_query_rewrite_timeout_seconds,
+            max_requests=1,
+        ),
+        model_settings=request_settings,
+        name="experience_query_rewrite",
+    )
+    return LLMExperienceQueryRewriter(
+        generator,
+        timeout_seconds=runtime.experience_query_rewrite_timeout_seconds,
     )
 
 

@@ -192,6 +192,8 @@ class RuntimeConfig(BaseModel):
     # matching only. The default covers a typical remote embedding round trip and leaves the rest of a one-second Hook
     # request to the other work.
     recall_embedding_timeout_seconds: float = Field(default=0.5, gt=0.0, le=60.0, allow_inf_nan=False)
+    experience_query_rewrite_enabled: bool = False
+    experience_query_rewrite_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0, allow_inf_nan=False)
     profile_schedule_enabled: bool = False
     profile_cron: str = "0 2 * * *"
     profile_timezone: str = "Asia/Shanghai"
@@ -221,11 +223,11 @@ class RuntimeConfig(BaseModel):
             raise ValueError(_RECALL_GATE_ROUND2_ORDER_ERROR)
         return self
 
-    @field_validator("recall_embedding_timeout_seconds", mode="before")
+    @field_validator("recall_embedding_timeout_seconds", "experience_query_rewrite_timeout_seconds", mode="before")
     @classmethod
     def reject_boolean_recall_embedding_timeout(cls, value: Any) -> Any:
         if isinstance(value, bool):
-            raise ValueError("recall embedding timeout must be a number")  # noqa: TRY003, TRY004 - Pydantic validation
+            raise ValueError("recall timeout must be a number")  # noqa: TRY003, TRY004 - Pydantic validation
         return value
 
     @field_validator("atomic_memory_related_page_size", mode="before")

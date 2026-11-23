@@ -216,6 +216,12 @@ from powercontext.builtin.runtime.models import (
     WorkingNoteKind,
 )
 from powercontext.builtin.runtime.protocols import PowerContextProvider, RemoteIngestion
+from powercontext.builtin.runtime.query_rewrite import (
+    ExperienceQueryRewriteInput,
+    ExperienceQueryRewriteOutput,
+    ExperienceQueryRewriter,
+    LLMExperienceQueryRewriter,
+)
 from powercontext.builtin.runtime.readiness import (
     CachedReadinessProbe,
     ReadinessCheckStatus,
@@ -326,6 +332,9 @@ __all__ = [
     "ExperienceCandidate",
     "ExperienceCandidatePage",
     "ExperienceIncubationResult",
+    "ExperienceQueryRewriteInput",
+    "ExperienceQueryRewriteOutput",
+    "ExperienceQueryRewriter",
     "ExternalSkillApplication",
     "ExternalSkillList",
     "ExternalSkillScanResult",
@@ -364,6 +373,7 @@ __all__ = [
     "InvalidRuntimeRequestError",
     "InventoryStatistics",
     "KnownSecretDecisionRequestSanitizer",
+    "LLMExperienceQueryRewriter",
     "ListCandidatesRequest",
     "ListDreamRunsRequest",
     "ListExternalSkillsRequest",
